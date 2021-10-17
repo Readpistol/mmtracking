@@ -4,16 +4,18 @@ import copy
 import os
 import os.path as osp
 import time
+import warnings
 
 import mmcv
 import torch
 from mmcv import Config, DictAction
-from mmcv.runner import init_dist
-from mmdet.apis import set_random_seed
+from mmcv.runner import get_dist_info, init_dist
 
-from mmtrack import __version__
-from mmtrack.datasets import build_dataset
-from mmtrack.utils import collect_env, get_root_logger
+from mmcls import __version__
+from mmcls.apis import set_random_seed, train_model
+from mmcls.datasets import build_dataset
+from mmcls.models import build_classifier
+from mmcls.utils import collect_env, get_root_logger
 
 
 def parse_args():
@@ -27,6 +29,7 @@ def parse_args():
         action='store_true',
         help='whether not to evaluate the checkpoint during training')
     group_gpus = parser.add_mutually_exclusive_group()
+    group_gpus.add_argument('--device', help='device used for training')
     group_gpus.add_argument(
         '--gpus',
         type=int,
@@ -44,11 +47,22 @@ def parse_args():
         action='store_true',
         help='whether to set deterministic options for CUDNN backend.')
     parser.add_argument(
+        '--options',
+        nargs='+',
+        action=DictAction,
+        help='override some settings in the used config, the key-value pair '
+        'in xxx=yyy format will be merged into config file (deprecate), '
+        'change to --cfg-options instead.')
+    parser.add_argument(
         '--cfg-options',
         nargs='+',
         action=DictAction,
         help='override some settings in the used config, the key-value pair '
-        'in xxx=yyy format will be merged into config file.')
+        'in xxx=yyy format will be merged into config file. If the value to '
+        'be overwritten is a list, it should be like key="[a,b]" or key=a,b '
+        'It also allows nested list/tuple values, e.g. key="[(a,b),(c,d)]" '
+        'Note that the quotation marks are necessary and that no white space '
+        'is allowed.')
     parser.add_argument(
         '--launcher',
         choices=['none', 'pytorch', 'slurm', 'mpi'],
@@ -59,6 +73,14 @@ def parse_args():
     if 'LOCAL_RANK' not in os.environ:
         os.environ['LOCAL_RANK'] = str(args.local_rank)
 
+    if args.options and args.cfg_options:
+        raise ValueError(
+            '--options and --cfg-options cannot be both '
+            'specified, --options is deprecated in favor of --cfg-options')
+    if args.options:
+        warnings.warn('--options is deprecated in favor of --cfg-options')
+        args.cfg_options = args.options
+
     return args
 
 
@@ -66,20 +88,6 @@ def main():
     args = parse_args()
 
     cfg = Config.fromfile(args.config)
-
-    if cfg.get('USE_MMDET', False):
-        from mmdet.apis import train_detector as train_model
-        from mmdet.models import build_detector as build_model
-        if 'detector' in cfg.model:
-            cfg.model = cfg.model.detector
-    elif cfg.get('TRAIN_REID', False):
-        from mmdet.apis import train_detector as train_model
-        from mmtrack.models import build_reid as build_model
-        if 'reid' in cfg.model:
-            cfg.model = cfg.model.reid
-    else:
-        from mmtrack.apis import train_model
-        from mmtrack.models import build_model
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
     # set cudnn_benchmark
@@ -107,6 +115,8 @@ def main():
     else:
         distributed = True
         init_dist(args.launcher, **cfg.dist_params)
+        _, world_size = get_dist_info()
+        cfg.gpu_ids = range(world_size)
 
     # create work_dir
     mmcv.mkdir_or_exist(osp.abspath(cfg.work_dir))
@@ -140,27 +150,23 @@ def main():
     cfg.seed = args.seed
     meta['seed'] = args.seed
 
-    if cfg.get('train_cfg', False):
-        model = build_model(
-            cfg.model, train_cfg=cfg.train_cfg, test_cfg=cfg.test_cfg)
-    else:
-        model = build_model(cfg.model)
+    model = build_classifier(cfg.model)
     model.init_weights()
 
+    # aydin deneme
     datasets = [build_dataset(cfg.data.train)]
     if len(cfg.workflow) == 2:
         val_dataset = copy.deepcopy(cfg.data.val)
         val_dataset.pipeline = cfg.data.train.pipeline
         datasets.append(build_dataset(val_dataset))
     if cfg.checkpoint_config is not None:
-        # save mmtrack version, config file content and class names in
+        # save mmcls version, config file content and class names in
         # checkpoints as meta data
         cfg.checkpoint_config.meta = dict(
-            mmtrack_version=__version__,
+            mmcls_version=__version__,
             config=cfg.pretty_text,
             CLASSES=datasets[0].CLASSES)
     # add an attribute for visualization convenience
-    model.CLASSES = datasets[0].CLASSES
     train_model(
         model,
         datasets,
@@ -168,6 +174,7 @@ def main():
         distributed=distributed,
         validate=(not args.no_validate),
         timestamp=timestamp,
+        device='cpu' if args.device == 'cpu' else 'cuda',
         meta=meta)
 
 
