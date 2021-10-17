@@ -153,8 +153,11 @@ def main():
     model = build_classifier(cfg.model)
     model.init_weights()
 
-    # aydin deneme
+    # aydin deneme2
     datasets = [build_dataset(cfg.data.train)]
+    print("|||||START|||||")
+    print(datasets.keys())
+    print("|||||   END     |||||")
     if len(cfg.workflow) == 2:
         val_dataset = copy.deepcopy(cfg.data.val)
         val_dataset.pipeline = cfg.data.train.pipeline
